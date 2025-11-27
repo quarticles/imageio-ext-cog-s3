@@ -123,15 +123,28 @@
   </distributionManagement>
 
   <repositories>
+    <!-- OSGeo has org.eclipse.imagen artifacts needed by imageio-ext -->
     <repository>
       <id>osgeo</id>
       <name>OSGeo Release Repository</name>
       <url>https://repo.osgeo.org/repository/release/</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>false</enabled>
+      </snapshots>
     </repository>
     <repository>
       <id>geosolutions</id>
       <name>GeoSolutions Repository</name>
       <url>https://maven.geo-solutions.it/</url>
+      <releases>
+        <enabled>true</enabled>
+      </releases>
+      <snapshots>
+        <enabled>true</enabled>
+      </snapshots>
     </repository>
   </repositories>
 </project>

@@ -24,8 +24,13 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
-      - name: Build with Maven
-        run: mvn -B clean package -DskipTests
+      - name: Build with Maven (with retry for transient repo failures)
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: mvn -B clean package -DskipTests
 
       - name: Run tests
         run: mvn -B test
