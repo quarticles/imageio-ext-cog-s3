@@ -4,7 +4,7 @@
 
   <groupId>io.github.quarticles</groupId>
   <artifactId>imageio-ext-cog-rangereader-s3</artifactId>
-  <version>2.0.1-quarticle-3</version>
+  <version>2.0.1-quarticle-4</version>
   <packaging>jar</packaging>
 
   <name>ImageIO-Ext COG S3 RangeReader (Quarticle Fork)</name>
@@ -56,6 +56,13 @@
     <dependency>
       <groupId>software.amazon.awssdk</groupId>
       <artifactId>s3</artifactId>
+      <version>${aws.sdk.version}</version>
+    </dependency>
+
+    <!-- AWS SDK v2 HTTP client (required for S3AsyncClient) -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>netty-nio-client</artifactId>
       <version>${aws.sdk.version}</version>
     </dependency>
 
