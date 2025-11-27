@@ -112,7 +112,7 @@ public class S3ConfigurationProperties {
         this.filename = nameFromKey(key);
 
         // Step 3: Load configuration in priority order
-        loadConfiguration(cogUri, queryParams, parser.region);
+        loadConfiguration(cogUri, queryParams, parser.region, parser.inferredEndpoint);
 
         // Validate region
         if (region == null || region.isEmpty()) {
@@ -128,7 +128,7 @@ public class S3ConfigurationProperties {
     /**
      * Loads configuration from multiple sources in priority order.
      */
-    private void loadConfiguration(BasicAuthURI cogUri, Map<String, String> queryParams, String parsedRegion) {
+    private void loadConfiguration(BasicAuthURI cogUri, Map<String, String> queryParams, String parsedRegion, String inferredEndpoint) {
         // Priority 1: URL query parameters
         String urlEndpoint = queryParams.get("endpoint");
         String urlRegion = queryParams.get("region");
@@ -147,13 +147,15 @@ public class S3ConfigurationProperties {
         int envMaxPoolSize = Integer.parseInt(PropertyLocator.getEnvironmentValue(AWS_S3_MAX_POOL_SIZE_KEY, "128"));
         int envKeepAliveTime = Integer.parseInt(PropertyLocator.getEnvironmentValue(AWS_S3_KEEP_ALIVE_TIME, "10"));
 
-        // Resolve endpoint (URL > Registry > Env)
+        // Resolve endpoint (URL > Registry > Env > Inferred)
         if (urlEndpoint != null && !urlEndpoint.isEmpty()) {
             this.endpoint = urlEndpoint;
         } else if (registryConfig.isPresent() && registryConfig.get().getEndpoint() != null) {
             this.endpoint = registryConfig.get().getEndpoint();
-        } else {
+        } else if (envEndpoint != null && !envEndpoint.isEmpty()) {
             this.endpoint = envEndpoint;
+        } else {
+            this.endpoint = inferredEndpoint;
         }
 
         // Resolve region (URL > Registry > Env > Parsed from URL)
@@ -165,6 +167,12 @@ public class S3ConfigurationProperties {
             this.region = envRegion;
         } else {
             this.region = parsedRegion;
+        }
+
+        // Fallback: If region is still null and we have a custom endpoint (likely non-AWS),
+        // default to "us-east-1" as the SDK requires a region.
+        if (this.region == null && this.endpoint != null) {
+            this.region = "us-east-1";
         }
 
         // Resolve credentials (BasicAuthURI > Registry > Env)
@@ -187,6 +195,8 @@ public class S3ConfigurationProperties {
         } else if (registryConfig.isPresent()) {
             this.forcePathStyle = registryConfig.get().isForcePathStyle();
         } else {
+            // If we are using a Generic/Inferred endpoint that isn't AWS, default to path style often works better,
+            // but we adhere to the env var default.
             this.forcePathStyle = Boolean.parseBoolean(envPathStyle);
         }
 
@@ -239,6 +249,9 @@ public class S3ConfigurationProperties {
                 return new HTTPPathStyleParser(uri, region, hostLowerCase.startsWith(S3_DASH));
             } else if (hostLowerCase.contains(S3_DASH_VH) || hostLowerCase.contains(S3_DOT_VH)) {
                 return new HTTPVirtualHostedStyleParser(uri, region, hostLowerCase.contains(S3_DASH_VH));
+            } else {
+                // Fallback for generic S3-compatible URLs (e.g. MinIO, Wasabi with custom domains)
+                return new GenericPathStyleParser(uri, region);
             }
         } else if (scheme.startsWith("s3")) {
             return new S3Parser(uri, region);
@@ -308,6 +321,7 @@ public class S3ConfigurationProperties {
         protected String key;
         protected String scheme;
         protected String host;
+        protected String inferredEndpoint;
         protected URI uri;
 
         S3URIParser(URI uri, String defaultRegion) {
@@ -321,29 +335,115 @@ public class S3ConfigurationProperties {
     class HTTPPathStyleParser extends S3URIParser {
         HTTPPathStyleParser(URI uri, String defaultRegion, boolean isOldDashRegion) {
             super(uri, defaultRegion);
-            String hostRegion = host.substring(S3_DASH.length()).split("\\.")[0];
-            if (hostRegion != null) region = hostRegion;
+            // Infer endpoint from host
+            this.inferredEndpoint = scheme + "://" + host;
+            
+            // Try to extract region, but don't fail if it's just a domain
+            // Format: s3[-.]<region>.domain.com or s3.domain.com (default region)
+            String hostRegion = null;
+            if (host.startsWith(S3_DASH) || host.startsWith(S3_DOT)) {
+                // remove prefix
+                String withoutPrefix = host.substring(3);
+                int firstDot = withoutPrefix.indexOf('.');
+                if (firstDot > 0) {
+                     hostRegion = withoutPrefix.substring(0, firstDot);
+                }
+            }
+            
+            if (hostRegion != null && !hostRegion.isEmpty()) {
+                region = hostRegion;
+            }
+            
             String path = uri.getPath();
             path = path.startsWith("/") ? path.substring(1) : path;
-            bucket = path.split("/")[0];
-            key = path.substring(bucket.length() + 1);
+            String[] parts = path.split("/", 2);
+            if (parts.length >= 2) {
+                bucket = parts[0];
+                key = parts[1];
+            } else {
+                // Fallback/Error case
+                bucket = parts[0];
+                key = "";
+            }
         }
     }
 
     class HTTPVirtualHostedStyleParser extends S3URIParser {
         HTTPVirtualHostedStyleParser(URI uri, String defaultRegion, boolean isOldDashRegion) {
             super(uri, defaultRegion);
-            int domainIndex = host.indexOf(AMAZON_AWS);
+            
             String s3Prefix = isOldDashRegion ? S3_DASH_VH : S3_DOT_VH;
             int s3Index = host.indexOf(s3Prefix);
-            bucket = host.substring(0, s3Index);
-            if (bucket.length() + s3Prefix.length() < domainIndex) {
-                String hostRegion = host.substring(bucket.length() + s3Prefix.length(), domainIndex);
-                if (hostRegion != null) region = hostRegion;
+            
+            if (s3Index > 0) {
+                bucket = host.substring(0, s3Index);
+                String remainder = host.substring(s3Index + s3Prefix.length());
+                
+                // Check for region
+                // AWS: bucket.s3.region.amazonaws.com -> remainder: region.amazonaws.com
+                // Custom: bucket.s3.region.domain.com -> remainder: region.domain.com
+                // Custom No Region: bucket.s3.domain.com -> remainder: domain.com
+                
+                int firstDot = remainder.indexOf('.');
+                if (firstDot > 0) {
+                    String potentialRegion = remainder.substring(0, firstDot);
+                    // Simple heuristic: if the remainder has at least 2 dots, the first part is likely a region.
+                    // e.g. eu-central-1.wasabisys.com
+                    // If it has 1 dot: wasabisys.com -> 'wasabisys' is likely domain, but could be region?
+                    // For now, we'll assume it's a region if it's not the *only* part of the domain.
+                    // But 'amazonaws.com' is 2 parts.
+                    
+                    if (remainder.contains(".")) {
+                         // Try to support standard AWS style logic which usually has a region here
+                         // except for 's3.amazonaws.com' (legacy)
+                         if (!remainder.equals("amazonaws.com")) {
+                             region = potentialRegion;
+                         }
+                    }
+                }
+                
+                // For virtual hosting, the endpoint is usually the suffix
+                // e.g. https://s3.region.domain.com or https://domain.com
+                // But S3Client expects the "service" endpoint.
+                // If we extracted a region, we can try to reconstruct.
+                // But safely, we can just use the scheme://host as endpoint? 
+                // No, for virtual hosting, the endpoint passed to SDK should usually be the base.
+                // If we pass https://bucket.s3.region.domain.com as endpoint override, SDK might get confused or double-bucket.
+                // However, if we don't set endpoint override, it defaults to AWS.
+                
+                // Strategy: If we detect a custom provider (not amazonaws), we MUST set an endpoint.
+                if (!host.endsWith(AMAZON_AWS)) {
+                    // Construct endpoint from remainder?
+                    // if host is bucket.s3.region.domain.com
+                    // endpoint should ideally be https://s3.region.domain.com
+                    this.inferredEndpoint = scheme + "://" + host.substring(s3Index + 1); // skip the dot before s3
+                }
             }
+            
             String path = uri.getPath();
             path = path.startsWith("/") ? path.substring(1) : path;
             key = path;
+        }
+    }
+    
+    class GenericPathStyleParser extends S3URIParser {
+        GenericPathStyleParser(URI uri, String defaultRegion) {
+            super(uri, defaultRegion);
+            this.inferredEndpoint = scheme + "://" + host;
+             if (uri.getPort() != -1) {
+                this.inferredEndpoint += ":" + uri.getPort();
+            }
+            
+            String path = uri.getPath();
+            path = path.startsWith("/") ? path.substring(1) : path;
+            String[] parts = path.split("/", 2);
+            if (parts.length >= 2) {
+                bucket = parts[0];
+                key = parts[1];
+            } else {
+                bucket = parts[0];
+                key = "";
+            }
         }
     }
 
