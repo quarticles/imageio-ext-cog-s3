@@ -84,13 +84,31 @@ public class S3RangeReader extends AbstractRangeReader {
 
     public S3RangeReader(BasicAuthURI uri, int headerLength) {
         super(uri, headerLength);
-        configProps = new S3ConfigurationProperties(uri.getUri().getScheme(), uri);
-        client = S3ClientFactory.getS3Client(configProps);
-
-        LOGGER.fine(() -> "Created S3RangeReader for bucket=" + configProps.getBucket()
-                + ", key=" + configProps.getKey()
-                + ", endpoint=" + configProps.getEndpoint()
-                + ", region=" + configProps.getRegion());
+        LOGGER.info(() -> "Creating S3RangeReader for URI: " + uri.getUri());
+        try {
+            configProps = new S3ConfigurationProperties(uri.getUri().getScheme(), uri);
+            LOGGER.info(() -> "S3ConfigurationProperties created: bucket=" + configProps.getBucket()
+                    + ", key=" + configProps.getKey()
+                    + ", endpoint=" + configProps.getEndpoint()
+                    + ", region=" + configProps.getRegion()
+                    + ", forcePathStyle=" + configProps.getForcePathStyle());
+        } catch (Exception e) {
+            LOGGER.severe("Failed to create S3ConfigurationProperties for URI " + uri.getUri() + ": " + e.getMessage());
+            if (e.getCause() != null) {
+                LOGGER.severe("Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage());
+            }
+            throw e;
+        }
+        try {
+            client = S3ClientFactory.getS3Client(configProps);
+            LOGGER.info(() -> "S3AsyncClient created successfully");
+        } catch (Exception e) {
+            LOGGER.severe("Failed to create S3AsyncClient: " + e.getMessage());
+            if (e.getCause() != null) {
+                LOGGER.severe("Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage());
+            }
+            throw e;
+        }
     }
 
     @Override
