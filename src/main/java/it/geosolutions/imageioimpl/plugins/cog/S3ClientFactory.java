@@ -20,21 +20,16 @@ package it.geosolutions.imageioimpl.plugins.cog;
 import java.net.URI;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
-import software.amazon.awssdk.core.client.config.SdkAdvancedAsyncClientOption;
 import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.s3.S3AsyncClient;
-import software.amazon.awssdk.services.s3.S3AsyncClientBuilder;
-import software.amazon.awssdk.utils.ThreadFactoryBuilder;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.S3ClientBuilder;
 
 /**
- * Factory for creating and caching S3 async clients.
+ * Factory for creating and caching S3 clients.
  *
  * <p>Clients are cached by a combination of endpoint and region to support
  * multi-cloud deployments with different S3-compatible providers.
@@ -51,15 +46,15 @@ public class S3ClientFactory {
      * Cache of S3 clients keyed by endpoint+region combination.
      * This allows different clients for AWS, Wasabi, MinIO, etc.
      */
-    private static final Map<String, S3AsyncClient> S3_CLIENTS = new ConcurrentHashMap<>();
+    private static final Map<String, S3Client> S3_CLIENTS = new ConcurrentHashMap<>();
 
     /**
-     * Gets or creates an S3 async client for the given configuration.
+     * Gets or creates an S3 client for the given configuration.
      *
      * @param configProps the S3 configuration properties
-     * @return the S3 async client
+     * @return the S3 client
      */
-    public static S3AsyncClient getS3Client(S3ConfigurationProperties configProps) {
+    public static S3Client getS3Client(S3ConfigurationProperties configProps) {
         String cacheKey = buildCacheKey(configProps);
 
         return S3_CLIENTS.computeIfAbsent(cacheKey, k -> {
@@ -78,10 +73,10 @@ public class S3ClientFactory {
     }
 
     /**
-     * Creates a new S3 async client.
+     * Creates a new S3 client.
      */
-    private static S3AsyncClient createClient(S3ConfigurationProperties configProps) {
-        S3AsyncClientBuilder builder = S3AsyncClient.builder();
+    private static S3Client createClient(S3ConfigurationProperties configProps) {
+        S3ClientBuilder builder = S3Client.builder();
 
         // Configure credentials
         configureCredentials(builder, configProps);
@@ -105,17 +100,13 @@ public class S3ClientFactory {
         // Configure path-style access (required for most S3-compatible providers)
         builder.forcePathStyle(configProps.getForcePathStyle());
 
-        // Configure async executor
-        builder.asyncConfiguration(b ->
-                b.advancedOption(SdkAdvancedAsyncClientOption.FUTURE_COMPLETION_EXECUTOR, createExecutor(configProps)));
-
         return builder.build();
     }
 
     /**
      * Configures credentials on the client builder.
      */
-    private static void configureCredentials(S3AsyncClientBuilder builder, S3ConfigurationProperties configProps) {
+    private static void configureCredentials(S3ClientBuilder builder, S3ConfigurationProperties configProps) {
         String user = configProps.getUser();
         String password = configProps.getPassword();
 
@@ -134,26 +125,6 @@ public class S3ClientFactory {
             LOGGER.fine("Using default AWS credential provider chain");
             builder.credentialsProvider(() -> DefaultCredentialsProvider.create().resolveCredentials());
         }
-    }
-
-    /**
-     * Creates a thread pool executor for async operations.
-     */
-    private static ThreadPoolExecutor createExecutor(S3ConfigurationProperties configProps) {
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                configProps.getCorePoolSize(),
-                configProps.getMaxPoolSize(),
-                configProps.getKeepAliveTime(),
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(10_000),
-                new ThreadFactoryBuilder()
-                        .threadNamePrefix("s3-async-" + configProps.getRegion() + "-")
-                        .build());
-
-        // Allow idle core threads to time out
-        executor.allowCoreThreadTimeOut(true);
-
-        return executor;
     }
 
     /**

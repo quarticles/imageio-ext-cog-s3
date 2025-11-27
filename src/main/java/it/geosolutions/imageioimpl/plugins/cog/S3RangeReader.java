@@ -18,8 +18,6 @@
  */
 package it.geosolutions.imageioimpl.plugins.cog;
 
-import static software.amazon.awssdk.core.async.AsyncResponseTransformer.toBytes;
-
 import it.geosolutions.imageio.core.BasicAuthURI;
 import java.net.MalformedURLException;
 import java.net.URI;
@@ -27,11 +25,10 @@ import java.net.URL;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
-import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 import software.amazon.awssdk.core.ResponseBytes;
-import software.amazon.awssdk.core.async.AsyncResponseTransformer;
-import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.core.sync.ResponseTransformer;
+import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 
@@ -65,7 +62,7 @@ import software.amazon.awssdk.services.s3.model.GetObjectResponse;
  */
 public class S3RangeReader extends AbstractRangeReader {
 
-    protected S3AsyncClient client;
+    protected S3Client client;
     protected S3ConfigurationProperties configProps;
 
     private static final Logger LOGGER = Logger.getLogger(S3RangeReader.class.getName());
@@ -101,9 +98,9 @@ public class S3RangeReader extends AbstractRangeReader {
         }
         try {
             client = S3ClientFactory.getS3Client(configProps);
-            LOGGER.info(() -> "S3AsyncClient created successfully");
+            LOGGER.info(() -> "S3Client created successfully");
         } catch (Exception e) {
-            LOGGER.severe("Failed to create S3AsyncClient: " + e.getMessage());
+            LOGGER.severe("Failed to create S3Client: " + e.getMessage());
             if (e.getCause() != null) {
                 LOGGER.severe("Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage());
             }
@@ -120,7 +117,7 @@ public class S3RangeReader extends AbstractRangeReader {
         GetObjectRequest headerRequest = buildRequest();
         try {
             ResponseBytes<GetObjectResponse> responseBytes =
-                    client.getObject(headerRequest, toBytes()).get();
+                    client.getObject(headerRequest, ResponseTransformer.toBytes());
 
             // get the header bytes
             byte[] headerBytes = responseBytes.asByteArray();
@@ -156,7 +153,7 @@ public class S3RangeReader extends AbstractRangeReader {
         GetObjectRequest headerRequest = buildRequest();
         try {
             ResponseBytes<GetObjectResponse> responseBytes =
-                    client.getObject(headerRequest, toBytes()).get();
+                    client.getObject(headerRequest, ResponseTransformer.toBytes());
 
             // get the header bytes
             byte[] headerBytes = responseBytes.asByteArray();
@@ -182,76 +179,47 @@ public class S3RangeReader extends AbstractRangeReader {
         ranges = reconcileRanges(ranges);
 
         Instant start = Instant.now();
-        Map<Long, CompletableFuture<ResponseBytes<GetObjectResponse>>> downloads = new HashMap<>(ranges.length);
-
         Map<Long, byte[]> values = new HashMap<>();
-        int[] missingRanges = new int[ranges.length];
-        int missing = 0;
-        for (int i = 0; i < ranges.length; i++) {
-            final long[] range = ranges[i];
+
+        for (long[] range : ranges) {
             final long rangeStart = range[0];
             byte[] dataRange = data.get(rangeStart);
             // Check for available data.
             if (dataRange == null) {
                 long rangeEnd = range[1];
-                CompletableFuture<ResponseBytes<GetObjectResponse>> futureGet = readAsync(rangeStart, rangeEnd);
-                downloads.put(rangeStart, futureGet);
-                // Mark the range as missing
-                missingRanges[missing++] = i;
+                byte[] fetchedData = readRange(rangeStart, rangeEnd);
+                values.put(rangeStart, fetchedData);
+                data.put(rangeStart, fetchedData);
             } else {
                 values.put(rangeStart, dataRange);
             }
         }
 
-        awaitCompletion(values, downloads);
         Instant end = Instant.now();
         LOGGER.fine("Time to read all ranges: " + Duration.between(start, end));
-        for (int k = 0; k < missing; k++) {
-            long range = ranges[missingRanges[k]][0];
-            data.put(range, values.get(range));
-        }
         return values;
     }
 
-    CompletableFuture<ResponseBytes<GetObjectResponse>> readAsync(final long rangeStart, long rangeEnd) {
+    /**
+     * Reads a single range from S3 synchronously.
+     *
+     * @param rangeStart the start byte offset
+     * @param rangeEnd the end byte offset
+     * @return the byte array containing the range data
+     */
+    byte[] readRange(final long rangeStart, long rangeEnd) {
         GetObjectRequest request = GetObjectRequest.builder()
                 .bucket(configProps.getBucket())
                 .key(configProps.getKey())
                 .range("bytes=" + rangeStart + "-" + rangeEnd)
                 .build();
-        return client.getObject(request, AsyncResponseTransformer.toBytes());
-    }
-
-    /**
-     * Blocks until all ranges have been read and written to the ByteBuffer
-     *
-     * @param data the map to store fetched data
-     * @param downloads the pending downloads
-     */
-    protected void awaitCompletion(
-            Map<Long, byte[]> data, Map<Long, CompletableFuture<ResponseBytes<GetObjectResponse>>> downloads) {
-        boolean stillWaiting = true;
-        List<Long> completed = new ArrayList<>(downloads.size());
-        while (stillWaiting) {
-            boolean allDone = true;
-            for (Map.Entry<Long, CompletableFuture<ResponseBytes<GetObjectResponse>>> entry : downloads.entrySet()) {
-                long key = entry.getKey();
-                CompletableFuture<ResponseBytes<GetObjectResponse>> future = entry.getValue();
-                if (future.isDone()) {
-                    if (!completed.contains(key)) {
-                        try {
-                            data.put(key, future.get().asByteArray());
-                            completed.add(key);
-                        } catch (Exception e) {
-                            LOGGER.warning(
-                                    "Unable to write data from S3 to the destination ByteBuffer. " + e.getMessage());
-                        }
-                    }
-                } else {
-                    allDone = false;
-                }
-            }
-            stillWaiting = !allDone;
+        try {
+            ResponseBytes<GetObjectResponse> responseBytes =
+                    client.getObject(request, ResponseTransformer.toBytes());
+            return responseBytes.asByteArray();
+        } catch (Exception e) {
+            LOGGER.severe("Error reading range " + rangeStart + "-" + rangeEnd + " for " + uri + ": " + e.getMessage());
+            throw new RuntimeException(e);
         }
     }
 
