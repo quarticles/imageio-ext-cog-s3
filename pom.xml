@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.quarticles</groupId>
+  <artifactId>imageio-ext-cog-rangereader-s3</artifactId>
+  <version>2.0.1-quarticle-1</version>
+  <packaging>jar</packaging>
+
+  <name>ImageIO-Ext COG S3 RangeReader (Quarticle Fork)</name>
+  <description>
+    Fork of imageio-ext COG S3 RangeReader with support for S3-compatible storage providers
+    (Wasabi, MinIO, DigitalOcean Spaces, etc.) and per-bucket configuration.
+  </description>
+  <url>https://github.com/quarticles/imageio-ext-cog-s3</url>
+
+  <licenses>
+    <license>
+      <name>GNU Lesser General Public License v3.0</name>
+      <url>https://www.gnu.org/licenses/lgpl-3.0.html</url>
+    </license>
+  </licenses>
+
+  <developers>
+    <developer>
+      <name>Quarticle Team</name>
+      <email>dev@quarticle.io</email>
+      <organization>Quarticle</organization>
+    </developer>
+  </developers>
+
+  <scm>
+    <connection>scm:git:git://github.com/quarticles/imageio-ext-cog-s3.git</connection>
+    <developerConnection>scm:git:ssh://github.com:quarticles/imageio-ext-cog-s3.git</developerConnection>
+    <url>https://github.com/quarticles/imageio-ext-cog-s3</url>
+  </scm>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <maven.compiler.release>11</maven.compiler.release>
+    <aws.sdk.version>2.32.25</aws.sdk.version>
+    <imageio-ext.version>2.0.1</imageio-ext.version>
+  </properties>
+
+  <dependencies>
+    <!-- ImageIO-Ext COG Commons (for BasicAuthURI, RangeReader, etc.) -->
+    <dependency>
+      <groupId>it.geosolutions.imageio-ext</groupId>
+      <artifactId>imageio-ext-cog-commons</artifactId>
+      <version>${imageio-ext.version}</version>
+    </dependency>
+
+    <!-- AWS SDK v2 for S3 -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>${aws.sdk.version}</version>
+    </dependency>
+
+    <!-- SLF4J for logging -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>1.7.36</version>
+    </dependency>
+
+    <!-- Test dependencies -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.11.0</version>
+        <configuration>
+          <release>11</release>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals>
+              <goal>jar-no-fork</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <version>3.6.3</version>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals>
+              <goal>jar</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <distributionManagement>
+    <repository>
+      <id>github</id>
+      <name>GitHub Quarticles Apache Maven Packages</name>
+      <url>https://maven.pkg.github.com/quarticles/imageio-ext-cog-s3</url>
+    </repository>
+  </distributionManagement>
+
+  <repositories>
+    <repository>
+      <id>osgeo</id>
+      <name>OSGeo Release Repository</name>
+      <url>https://repo.osgeo.org/repository/release/</url>
+    </repository>
+    <repository>
+      <id>geosolutions</id>
+      <name>GeoSolutions Repository</name>
+      <url>https://maven.geo-solutions.it/</url>
+    </repository>
+  </repositories>
+</project>
