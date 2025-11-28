@@ -81,7 +81,7 @@ public final class S3ConfigRegistry {
         if (config == null) {
             throw new IllegalArgumentException("Config cannot be null");
         }
-        LOGGER.info("Registering S3 config for bucket: " + bucketName + " -> " + config);
+        LOGGER.fine("Registering S3 config for bucket: " + bucketName + " -> " + config);
         BUCKET_CONFIGS.put(bucketName, config);
     }
 
@@ -92,7 +92,7 @@ public final class S3ConfigRegistry {
      * @return the removed configuration, or null if none was registered
      */
     public static S3StorageConfig unregister(String bucketName) {
-        LOGGER.info("Unregistering S3 config for bucket: " + bucketName);
+        LOGGER.fine("Unregistering S3 config for bucket: " + bucketName);
         return BUCKET_CONFIGS.remove(bucketName);
     }
 
@@ -112,7 +112,7 @@ public final class S3ConfigRegistry {
      * @param config the default configuration
      */
     public static void setDefault(S3StorageConfig config) {
-        LOGGER.info("Setting default S3 config: " + config);
+        LOGGER.fine("Setting default S3 config: " + config);
         defaultConfig = config;
     }
 
@@ -143,7 +143,7 @@ public final class S3ConfigRegistry {
      * Clears all registered configurations.
      */
     public static void clear() {
-        LOGGER.info("Clearing all S3 configs");
+        LOGGER.fine("Clearing all S3 configs");
         BUCKET_CONFIGS.clear();
         defaultConfig = null;
     }

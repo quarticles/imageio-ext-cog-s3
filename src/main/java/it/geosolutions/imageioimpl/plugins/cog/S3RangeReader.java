@@ -25,6 +25,8 @@ import java.net.URL;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
@@ -67,6 +69,30 @@ public class S3RangeReader extends AbstractRangeReader {
 
     private static final Logger LOGGER = Logger.getLogger(S3RangeReader.class.getName());
 
+    /** Shared executor for parallel range reads */
+    private static final ExecutorService RANGE_READ_EXECUTOR = createRangeReadExecutor();
+
+    /** Maximum number of parallel range reads per request */
+    private static final int MAX_PARALLEL_READS = Integer.parseInt(
+            System.getProperty("cog.s3.maxParallelReads", "8"));
+
+    private static ExecutorService createRangeReadExecutor() {
+        int poolSize = Integer.parseInt(System.getProperty("cog.s3.rangeReadPoolSize", "32"));
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(
+                poolSize / 2,
+                poolSize,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(1000),
+                r -> {
+                    Thread t = new Thread(r, "cog-s3-range-reader");
+                    t.setDaemon(true);
+                    return t;
+                },
+                new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.allowCoreThreadTimeOut(true);
+        return executor;
+    }
+
     public S3RangeReader(String url, int headerLength) {
         this(URI.create(url), headerLength);
     }
@@ -81,29 +107,23 @@ public class S3RangeReader extends AbstractRangeReader {
 
     public S3RangeReader(BasicAuthURI uri, int headerLength) {
         super(uri, headerLength);
-        LOGGER.info(() -> "Creating S3RangeReader for URI: " + uri.getUri());
+        LOGGER.fine(() -> "Creating S3RangeReader for URI: " + uri.getUri());
         try {
             configProps = new S3ConfigurationProperties(uri.getUri().getScheme(), uri);
-            LOGGER.info(() -> "S3ConfigurationProperties created: bucket=" + configProps.getBucket()
+            LOGGER.fine(() -> "S3ConfigurationProperties created: bucket=" + configProps.getBucket()
                     + ", key=" + configProps.getKey()
                     + ", endpoint=" + configProps.getEndpoint()
                     + ", region=" + configProps.getRegion()
                     + ", forcePathStyle=" + configProps.getForcePathStyle());
         } catch (Exception e) {
-            LOGGER.severe("Failed to create S3ConfigurationProperties for URI " + uri.getUri() + ": " + e.getMessage());
-            if (e.getCause() != null) {
-                LOGGER.severe("Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage());
-            }
+            LOGGER.log(Level.SEVERE, "Failed to create S3ConfigurationProperties for URI " + uri.getUri(), e);
             throw e;
         }
         try {
             client = S3ClientFactory.getS3Client(configProps);
-            LOGGER.info(() -> "S3Client created successfully");
+            LOGGER.fine(() -> "S3Client obtained successfully");
         } catch (Exception e) {
-            LOGGER.severe("Failed to create S3Client: " + e.getMessage());
-            if (e.getCause() != null) {
-                LOGGER.severe("Caused by: " + e.getCause().getClass().getName() + ": " + e.getCause().getMessage());
-            }
+            LOGGER.log(Level.SEVERE, "Failed to create S3Client", e);
             throw e;
         }
     }
@@ -132,8 +152,8 @@ public class S3RangeReader extends AbstractRangeReader {
             data.put(0L, headerBytes);
             return headerBytes;
         } catch (Exception e) {
-            LOGGER.severe("Error reading header for " + uri + ": " + e.getMessage());
-            throw new RuntimeException(e);
+            LOGGER.log(Level.SEVERE, "Error reading header for " + uri, e);
+            throw new S3ReadException("Error reading header for " + uri, e);
         }
     }
 
@@ -161,8 +181,8 @@ public class S3RangeReader extends AbstractRangeReader {
             HEADERS_CACHE.put(uri.toString(), headerBytes);
             return headerBytes;
         } catch (Exception e) {
-            LOGGER.severe("Error reading header for " + uri + ": " + e.getMessage());
-            throw new RuntimeException(e);
+            LOGGER.log(Level.SEVERE, "Error reading header for " + uri, e);
+            throw new S3ReadException("Error reading header for " + uri, e);
         }
     }
 
@@ -176,28 +196,91 @@ public class S3RangeReader extends AbstractRangeReader {
 
     @Override
     public Map<Long, byte[]> read(long[]... ranges) {
-        ranges = reconcileRanges(ranges);
+        final long[][] reconciledRanges = reconcileRanges(ranges);
 
         Instant start = Instant.now();
-        Map<Long, byte[]> values = new HashMap<>();
+        Map<Long, byte[]> values = new ConcurrentHashMap<>();
 
-        for (long[] range : ranges) {
+        // Collect ranges that need to be fetched
+        List<long[]> missingRanges = new ArrayList<>();
+        for (long[] range : reconciledRanges) {
             final long rangeStart = range[0];
             byte[] dataRange = data.get(rangeStart);
-            // Check for available data.
-            if (dataRange == null) {
-                long rangeEnd = range[1];
-                byte[] fetchedData = readRange(rangeStart, rangeEnd);
-                values.put(rangeStart, fetchedData);
-                data.put(rangeStart, fetchedData);
-            } else {
+            if (dataRange != null) {
                 values.put(rangeStart, dataRange);
+            } else {
+                missingRanges.add(range);
+            }
+        }
+
+        // Fetch missing ranges in parallel
+        if (!missingRanges.isEmpty()) {
+            if (missingRanges.size() == 1) {
+                // Single range - read directly without executor overhead
+                long[] range = missingRanges.get(0);
+                byte[] fetchedData = readRange(range[0], range[1]);
+                values.put(range[0], fetchedData);
+                data.put(range[0], fetchedData);
+            } else {
+                // Multiple ranges - read in parallel
+                readRangesParallel(missingRanges, values);
             }
         }
 
         Instant end = Instant.now();
-        LOGGER.fine("Time to read all ranges: " + Duration.between(start, end));
+        final int totalRanges = reconciledRanges.length;
+        final int fetchedCount = missingRanges.size();
+        LOGGER.fine(() -> "Time to read " + totalRanges + " ranges (" + fetchedCount
+                + " fetched): " + Duration.between(start, end).toMillis() + "ms");
         return values;
+    }
+
+    /**
+     * Reads multiple ranges in parallel using the shared executor.
+     *
+     * @param ranges the ranges to read
+     * @param values the map to store results
+     */
+    private void readRangesParallel(List<long[]> ranges, Map<Long, byte[]> values) {
+        // Limit parallelism to avoid overwhelming the connection pool
+        int batchSize = Math.min(ranges.size(), MAX_PARALLEL_READS);
+
+        List<CompletableFuture<Void>> futures = new ArrayList<>(batchSize);
+
+        for (long[] range : ranges) {
+            final long rangeStart = range[0];
+            final long rangeEnd = range[1];
+
+            CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                try {
+                    byte[] fetchedData = readRange(rangeStart, rangeEnd);
+                    values.put(rangeStart, fetchedData);
+                    data.put(rangeStart, fetchedData);
+                } catch (Exception e) {
+                    LOGGER.log(Level.WARNING, "Error reading range " + rangeStart + "-" + rangeEnd, e);
+                    throw new CompletionException(e);
+                }
+            }, RANGE_READ_EXECUTOR);
+
+            futures.add(future);
+        }
+
+        // Wait for all futures to complete
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(120, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new S3ReadException("Interrupted while reading ranges from " + uri, e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof S3ReadException) {
+                throw (S3ReadException) cause;
+            }
+            throw new S3ReadException("Error reading ranges from " + uri, cause);
+        } catch (TimeoutException e) {
+            throw new S3ReadException("Timeout reading ranges from " + uri, e);
+        }
     }
 
     /**
@@ -218,8 +301,8 @@ public class S3RangeReader extends AbstractRangeReader {
                     client.getObject(request, ResponseTransformer.toBytes());
             return responseBytes.asByteArray();
         } catch (Exception e) {
-            LOGGER.severe("Error reading range " + rangeStart + "-" + rangeEnd + " for " + uri + ": " + e.getMessage());
-            throw new RuntimeException(e);
+            throw new S3ReadException("Error reading range " + rangeStart + "-" + rangeEnd
+                    + " from " + configProps.getBucket() + "/" + configProps.getKey(), e);
         }
     }
 
