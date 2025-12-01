@@ -33,6 +33,7 @@ import software.amazon.awssdk.core.sync.ResponseTransformer;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 
 /**
  * S3 Range Reader with support for S3-compatible storage providers.
@@ -151,6 +152,10 @@ public class S3RangeReader extends AbstractRangeReader {
 
             data.put(0L, headerBytes);
             return headerBytes;
+        } catch (NoSuchKeyException e) {
+            // File does not exist - this is expected for optional files like .ovr overviews
+            LOGGER.fine(() -> "File not found (NoSuchKeyException): " + uri);
+            throw new S3FileNotFoundException("File not found: " + uri, e);
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Error reading header for " + uri, e);
             throw new S3ReadException("Error reading header for " + uri, e);
@@ -180,6 +185,10 @@ public class S3RangeReader extends AbstractRangeReader {
             data.put(0L, headerBytes);
             HEADERS_CACHE.put(uri.toString(), headerBytes);
             return headerBytes;
+        } catch (NoSuchKeyException e) {
+            // File does not exist - this is expected for optional files like .ovr overviews
+            LOGGER.fine(() -> "File not found (NoSuchKeyException): " + uri);
+            throw new S3FileNotFoundException("File not found: " + uri, e);
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Error reading header for " + uri, e);
             throw new S3ReadException("Error reading header for " + uri, e);
